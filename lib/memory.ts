@@ -8,7 +8,6 @@ const supabase = createClient(
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// Memory Types
 export type MemoryType = 'episodic' | 'semantic' | 'procedural';
 
 export interface Memory {
@@ -31,7 +30,6 @@ export class MemoryManager {
     this.agentId = agentId;
   }
 
-  // Store a memory
   async store(content: string, type: MemoryType, metadata?: Record<string, any>) {
     try {
       const embedding = await this.generateEmbedding(content);
@@ -59,7 +57,6 @@ export class MemoryManager {
     }
   }
 
-  // Recall relevant memories
   async recall(query: string, limit = 5) {
     try {
       const embedding = await this.generateEmbedding(query);
@@ -73,7 +70,6 @@ export class MemoryManager {
 
       if (error) throw error;
 
-      // Update last accessed
       for (const memory of data || []) {
         await supabase
           .from('memories')
@@ -87,7 +83,6 @@ export class MemoryManager {
     }
   }
 
-  // Forget old/unused memories
   async forget(olderThanDays = 30) {
     try {
       const cutoff = new Date();
@@ -106,7 +101,6 @@ export class MemoryManager {
     }
   }
 
-  // Get memory stats
   async getStats() {
     try {
       const { data, error } = await supabase
@@ -116,7 +110,7 @@ export class MemoryManager {
 
       if (error) throw error;
 
-      const stats = {
+      return {
         total: data?.length || 0,
         byType: {
           episodic: data?.filter(m => m.type === 'episodic').length || 0,
@@ -125,19 +119,48 @@ export class MemoryManager {
         },
         avgImportance: data?.reduce((sum, m) => sum + m.importance, 0) / (data?.length || 1) || 0,
       };
-
-      return stats;
     } catch (error: any) {
       throw new Error(`Memory stats error: ${error?.message || 'Unknown error'}`);
     }
   }
 
+  async consolidate() {
+    try {
+      const memories = await this.recall('', 100);
+      const semantic = memories.filter((m: any) => m.type === 'semantic');
+      const summary = await this.summarize(semantic.map((m: any) => m.content).join('\n'));
+      await this.store(summary, 'semantic', { consolidated: true });
+      return { consolidated: true, summary };
+    } catch (error: any) {
+      throw new Error(`Memory consolidation error: ${error?.message || 'Unknown error'}`);
+    }
+  }
+
+  private async summarize(text: string): Promise<string> {
+    try {
+      const response = await openai.chat.completions.create({
+        model: 'gpt-4-turbo-preview',
+        messages: [
+          { role: 'system', content: 'Summarize the following memories into key facts.' },
+          { role: 'user', content: text },
+        ],
+      });
+      return response.choices[0].message.content || '';
+    } catch (error: any) {
+      throw new Error(`Summarize error: ${error?.message || 'Unknown error'}`);
+    }
+  }
+
   private async generateEmbedding(text: string): Promise<number[]> {
-    const res = await openai.embeddings.create({
-      model: 'text-embedding-3-small',
-      input: text,
-    });
-    return res.data[0].embedding;
+    try {
+      const res = await openai.embeddings.create({
+        model: 'text-embedding-3-small',
+        input: text,
+      });
+      return res.data[0].embedding;
+    } catch (error: any) {
+      throw new Error(`Generate embedding error: ${error?.message || 'Unknown error'}`);
+    }
   }
 
   private calculateImportance(content: string, type: MemoryType): number {
@@ -147,5 +170,162 @@ export class MemoryManager {
     if (content.length > 100) base += 0.1;
     if (content.includes('important') || content.includes('critical')) base += 0.2;
     return Math.min(base, 1.0);
+  }
+}
+
+// Conversation History
+export class ConversationHistory {
+  private agentId: string;
+
+  constructor(agentId: string) {
+    this.agentId = agentId;
+  }
+
+  async addMessage(role: 'user' | 'assistant', content: string) {
+    try {
+      const { error } = await supabase
+        .from('conversation_history')
+        .insert({
+          agent_id: this.agentId,
+          role,
+          content,
+          timestamp: new Date().toISOString(),
+        });
+
+      if (error) throw error;
+    } catch (error: any) {
+      throw new Error(`Add message error: ${error?.message || 'Unknown error'}`);
+    }
+  }
+
+  async getHistory(limit = 50) {
+    try {
+      const { data, error } = await supabase
+        .from('conversation_history')
+        .select('*')
+        .eq('agent_id', this.agentId)
+        .order('timestamp', { ascending: false })
+        .limit(limit);
+
+      if (error) throw error;
+      return (data || []).reverse();
+    } catch (error: any) {
+      throw new Error(`Get history error: ${error?.message || 'Unknown error'}`);
+    }
+  }
+
+  async clearHistory() {
+    try {
+      const { error } = await supabase
+        .from('conversation_history')
+        .delete()
+        .eq('agent_id', this.agentId);
+
+      if (error) throw error;
+    } catch (error: any) {
+      throw new Error(`Clear history error: ${error?.message || 'Unknown error'}`);
+    }
+  }
+}
+
+// Knowledge Graph
+export class KnowledgeGraph {
+  private agentId: string;
+
+  constructor(agentId: string) {
+    this.agentId = agentId;
+  }
+
+  async addEntity(name: string, type: string, properties?: Record<string, any>) {
+    try {
+      const { data, error } = await supabase
+        .from('entities')
+        .insert({
+          agent_id: this.agentId,
+          name,
+          type,
+          properties,
+        })
+        .select()
+        .single();
+
+      if (error) throw error;
+      return data;
+    } catch (error: any) {
+      throw new Error(`Add entity error: ${error?.message || 'Unknown error'}`);
+    }
+  }
+
+  async addRelation(fromEntity: string, toEntity: string, relationType: string) {
+    try {
+      const { data, error } = await supabase
+        .from('relations')
+        .insert({
+          agent_id: this.agentId,
+          from_entity: fromEntity,
+          to_entity: toEntity,
+          relation_type: relationType,
+        })
+        .select()
+        .single();
+
+      if (error) throw error;
+      return data;
+    } catch (error: any) {
+      throw new Error(`Add relation error: ${error?.message || 'Unknown error'}`);
+    }
+  }
+
+  async getEntity(name: string) {
+    try {
+      const { data, error } = await supabase
+        .from('entities')
+        .select('*')
+        .eq('agent_id', this.agentId)
+        .eq('name', name)
+        .single();
+
+      if (error) throw error;
+      return data;
+    } catch (error: any) {
+      throw new Error(`Get entity error: ${error?.message || 'Unknown error'}`);
+    }
+  }
+
+  async getRelations(entityName: string) {
+    try {
+      const { data, error } = await supabase
+        .from('relations')
+        .select('*')
+        .eq('agent_id', this.agentId)
+        .or(`from_entity.eq.${entityName},to_entity.eq.${entityName}`);
+
+      if (error) throw error;
+      return data;
+    } catch (error: any) {
+      throw new Error(`Get relations error: ${error?.message || 'Unknown error'}`);
+    }
+  }
+
+  async getGraph() {
+    try {
+      const { data: entities, error: entitiesError } = await supabase
+        .from('entities')
+        .select('*')
+        .eq('agent_id', this.agentId);
+
+      if (entitiesError) throw entitiesError;
+
+      const { data: relations, error: relationsError } = await supabase
+        .from('relations')
+        .select('*')
+        .eq('agent_id', this.agentId);
+
+      if (relationsError) throw relationsError;
+
+      return { entities: entities || [], relations: relations || [] };
+    } catch (error: any) {
+      throw new Error(`Get graph error: ${error?.message || 'Unknown error'}`);
+    }
   }
 }
